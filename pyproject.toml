@@ -9,7 +9,6 @@ dependencies = [
     "scipy>=1.11",
     "pyyaml>=6.0",
     "gymnasium>=1.0",
-    "pypsa>=1.0",
     "opendssdirect.py>=0.9",
 ]
 
@@ -19,11 +18,13 @@ api = ["fastapi>=0.110", "uvicorn>=0.29"]
 controlplane = ["grpcio>=1.60", "grpcio-tools>=1.60"]
 mqtt = ["paho-mqtt>=2.0"]
 deploy = ["paho-mqtt>=2.0", "psycopg[binary]>=3.1"]
+optimization = ["pulp>=2.8"]
 dev = [
     "pytest>=8.0", "hypothesis>=6.0", "torch>=2.2",
     "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27",
     "grpcio>=1.60", "grpcio-tools>=1.60",
     "paho-mqtt>=2.0", "psycopg[binary]>=3.1", "amqtt>=0.11",
+    "pulp>=2.8",
 ]
 
 [build-system]
