@@ -8,7 +8,15 @@ that want to ask "what happens when something breaks," the same way
 `allotrope.optimization` is an opt-in offline oracle.
 """
 
+from allotrope.faults.core import FaultState, apply_command_faults, apply_renewable_derates
 from allotrope.faults.events import FaultEvent, FaultKind
 from allotrope.faults.injector import FaultInjector
 
-__all__ = ["FaultEvent", "FaultKind", "FaultInjector"]
+__all__ = [
+    "FaultEvent",
+    "FaultKind",
+    "FaultInjector",
+    "FaultState",
+    "apply_command_faults",
+    "apply_renewable_derates",
+]
