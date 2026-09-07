@@ -147,13 +147,26 @@ reported honestly rather than replaced with a "more interesting" run — a
 tracker that only reports flattering numbers when they happen to occur is not
 one that can be trusted when they don't.
 
+## Now wired into the RL observation
+
+`PolarMicrogridEnv` runs its own `AssetHealthTracker` instance (reset fresh
+each episode, exactly like this module's own usage pattern above) and
+appends each genset's `wear_score()` (scaled down from its native rupee
+units) and each battery's `full_equivalent_cycles()` to the observation
+vector, so a learned policy can see *accumulated* stress rather than only
+the current step's deposit or SOC. This is still read-only: the tracker
+observes telemetry the plant already produced; it does not feed back into
+dispatch, the reward, or the safety layer. `tests/test_env.py`'s
+`test_wear_score_and_fec_features_track_the_asset_health_tracker` verifies
+the observation's features are bit-for-bit what this tracker computes.
+
 ## What is not done in this pass
 
-- **Not wired into dispatch or the control loop.** No controller,
-  `allotrope.envs`, or `allotrope.safety` code reads from this tracker. This
-  is deliberately a standalone observation layer; predictive-maintenance-aware
-  dispatch (e.g. a controller that avoids further stressing a high-wear
-  genset) is future work, not part of this slice.
+- **Not wired into the reward or dispatch decisions.** The agent can now
+  *see* wear/FEC, but nothing yet prices battery cycling in the reward the
+  way genset starts and deposit already are (`allotrope.envs.reward`), and
+  no controller changes its behaviour based on a high wear score --
+  predictive-maintenance-aware dispatch is still future work.
 - **No failure probabilities or remaining-useful-life estimates**, for the
   reasons given above — there is no evidence in this codebase to support
   either, and inventing one would violate this project's own rules.

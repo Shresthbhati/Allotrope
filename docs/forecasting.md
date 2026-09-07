@@ -3,9 +3,35 @@
 `allotrope/intelligence/forecasting/` forecasts the four series
 `PolarMicrogridEnv._observe` reads from `plant.observe()` on every step:
 `electrical_load_kw`, `firm_thermal_kw`, `pv_available_kw`, `wind_available_kw`.
-It is a standalone capability built and evaluated in this pass. **It is not
-consumed by `allotrope.agents`, `allotrope.envs`, or `allotrope.safety`.**
-Nothing in the control loop reads a forecast today.
+It was built and evaluated standalone; **as of the observation change below,
+`PolarMicrogridEnv._observe` now consumes `EWMAForecaster` at the 24h
+horizon** for two station-level features (a load forecast and a combined
+renewables forecast) -- the one horizon the evaluation below found EWMA
+actually beats plain persistence on. `allotrope.safety` still does not
+consume a forecast, and does not need to: the projection bounds the
+*current* step's action, not a prediction of a future one.
+
+## Wired into the RL observation
+
+`PolarMicrogridEnv._observe` appends `EWMAForecaster().forecast(history, 24)`
+for `electrical_load_kw` and `pv_available_kw + wind_available_kw`, where
+`history` is the strictly-past sequence of true values seen so far *this
+episode* (cleared on `reset()`, exactly like the asset-health tracker below,
+so an agent trained with `randomise_start=True` never sees a forecast built
+from a different, unrelated episode's history). Before any step has run,
+there is no history yet; the feature falls back to the current instantaneous
+reading -- what `PersistenceForecaster` and `EWMAForecaster` themselves do on
+a single-point history, not a fabricated number. `tests/test_env.py`'s
+`test_forecast_features_match_an_independently_computed_ewma` verifies the
+observation's forecast feature is bit-for-bit what `EWMAForecaster` computes
+against the same history, not merely "some number in range."
+
+This is not yet reflected in a fresh training run: wiring it into the
+observation changes the observation's shape, so the existing 500k-step
+checkpoint this project reports numbers for cannot simply keep training
+through this change (it would need reinitialising, same as any observation-
+width change). A retrain measuring this feature's real effect is separate,
+future work -- not claimed here in advance.
 
 ## What's implemented
 
