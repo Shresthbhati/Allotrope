@@ -107,6 +107,82 @@ def test_observation_width_matches_the_declared_space(station):
     assert obs.shape == env.observation_space.shape
 
 
+def test_forecast_features_fall_back_to_the_current_reading_before_any_history():
+    """No steps yet -> no honest forecast yet -> use the instantaneous value.
+
+    Matches PersistenceForecaster's and EWMAForecaster's own behaviour on a
+    single-point history: the best available estimate of the future, before
+    any history exists, is simply "now" -- not a fabricated number.
+    """
+    env = PolarMicrogridEnv(station="maitri", start=WINTER, periods=48, seed=0)
+    obs, _ = env.reset(seed=0)
+    load_idx, renewable_idx = 12, 13
+    scale = env._power_scale_kw
+    raw = env.plant.observe()
+    assert obs[load_idx] == pytest.approx(raw["electrical_load_kw"] / scale, abs=1e-5)
+    assert obs[renewable_idx] == pytest.approx(
+        (raw["pv_available_kw"] + raw["wind_available_kw"]) / scale, abs=1e-5
+    )
+
+
+def test_forecast_features_match_an_independently_computed_ewma():
+    """After real history exists, the observation's forecast must equal
+    EWMAForecaster applied to that same history -- not merely "some number"."""
+    from allotrope.intelligence.forecasting import EWMAForecaster
+
+    env = PolarMicrogridEnv(station="maitri", start=WINTER, periods=48, seed=0)
+    obs, _ = env.reset(seed=0)
+    action = {
+        "genset_on": np.zeros(len(env.cfg.gensets), dtype=np.int8),
+        "dispatch": np.zeros(len(env.cfg.gensets) + len(env.cfg.storage) + 1, dtype=np.float32),
+    }
+    for _ in range(30):
+        obs, _, _, _, _ = env.step(action)
+
+    scale = env._power_scale_kw
+    expected_load = EWMAForecaster().forecast(np.asarray(env._load_history), 24)
+    expected_renewable = EWMAForecaster().forecast(np.asarray(env._renewable_history), 24)
+    assert obs[12] == pytest.approx(np.clip(expected_load / scale, -5.0, 5.0), abs=1e-4)
+    assert obs[13] == pytest.approx(np.clip(expected_renewable / scale, -5.0, 5.0), abs=1e-4)
+
+
+def test_wear_score_and_fec_features_track_the_asset_health_tracker():
+    """Not a second bookkeeping system: the observation's wear/FEC features
+    must equal exactly what allotrope.intelligence.asset_health computes,
+    scaled the documented way -- run for real against EfficientRuleBased so
+    at least one genset actually starts and accrues real wear."""
+    from allotrope.control.baseline import EfficientRuleBased
+
+    env = PolarMicrogridEnv(station="maitri", start=WINTER, periods=24 * 3, seed=0)
+    controller = EfficientRuleBased(cfg=env.cfg)
+    obs, _ = env.reset(seed=0)
+
+    n_g, n_s = len(env.cfg.gensets), len(env.cfg.storage)
+    wear_start = 14 + 5 * n_g + 2 * n_s
+    fec_start = 14 + 6 * n_g + 2 * n_s
+
+    # Stop one step short of the episode's natural end: step() intentionally
+    # returns an all-zero observation on termination (there is no
+    # meaningful "next state" past the end of the weather), which would
+    # make this test compare against that zero vector instead of a real one.
+    for _ in range(24 * 3 - 1):
+        command = controller.act(env.plant.observe(), env.plant)
+        obs, _, terminated, truncated, _ = env.step(env.encode_command(command))
+        assert not terminated and not truncated
+
+    total_starts = sum(h.starts for h in env._asset_tracker.gensets.values())
+    assert total_starts > 0, "test is meaningless if no genset ever started"
+
+    for k, g in enumerate(env.cfg.gensets):
+        expected = np.clip(env._asset_tracker.gensets[g.id].wear_score().value / 5000.0, -5.0, 5.0)
+        assert obs[wear_start + k] == pytest.approx(expected, abs=1e-4)
+    for k, s in enumerate(env.cfg.storage):
+        expected = np.clip(
+            env._asset_tracker.batteries[s.id].full_equivalent_cycles().value, -5.0, 5.0
+        )
+        assert obs[fec_start + k] == pytest.approx(expected, abs=1e-4)
+
+
 def test_stations_of_different_sizes_produce_comparable_observations():
     """Scaling by installed capacity is what lets one policy serve both stations."""
     small = PolarMicrogridEnv(station="maitri", start=WINTER, periods=48, seed=0)
