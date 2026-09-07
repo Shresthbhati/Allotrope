@@ -30,12 +30,24 @@ from gymnasium import spaces
 
 from allotrope.config import StationConfig, load_station
 from allotrope.envs.reward import RewardFunction, RewardWeights
+from allotrope.intelligence.asset_health import AssetHealthTracker
+from allotrope.intelligence.forecasting import EWMAForecaster
 from allotrope.safety.projection import SafetyProjection
 from allotrope.sim.plant import DispatchCommand, PolarMicrogrid
 from allotrope.sim.runner import build_plant
 
 SECONDS_PER_DAY = 86_400.0
 DAYS_PER_YEAR = 365.25
+
+# How far ahead the observation's forecast features look. 24 steps (24h at
+# this project's 1h dispatch interval) is not an arbitrary choice: 1-step
+# forecasts add nothing an agent doesn't already see in the current
+# observation (docs/forecasting.md measures plain persistence winning at 1h
+# on every signal, since the forecast and "now" are then the same number),
+# while 24h is exactly the horizon that same evaluation found EWMA actually
+# beats persistence on -- the one place forecasting has been shown to add
+# real information the instantaneous reading doesn't already carry.
+FORECAST_HORIZON_STEPS = 24
 
 
 class PolarMicrogridEnv(gym.Env):
@@ -98,6 +110,18 @@ class PolarMicrogridEnv(gym.Env):
         self.last_breakdown = None
         self.last_safety_report = None
 
+        # Read-only, per-episode: accumulates exactly like
+        # allotrope.intelligence.asset_health's own tracker (same class,
+        # same formulas -- no second bookkeeping system), reset fresh each
+        # episode so the wear/FEC features an agent sees reflect only what
+        # happened since the current episode started, matching how an
+        # agent trained on randomised episode starts (`randomise_start`)
+        # cannot see stress accumulated in a different, unrelated window.
+        self._asset_tracker = AssetHealthTracker(self.cfg, dt_h=self.plant.dt_h)
+        self._forecaster = EWMAForecaster()
+        self._load_history: list[float] = []
+        self._renewable_history: list[float] = []
+
     # -- scaling ----------------------------------------------------------
 
     @property
@@ -106,7 +130,11 @@ class PolarMicrogridEnv(gym.Env):
         return max(self.cfg.total_genset_kw, 1.0)
 
     def _observation_width(self) -> int:
-        return 12 + 5 * len(self.cfg.gensets) + 2 * len(self.cfg.storage)
+        # +2 station-level forecast features (load, renewables); +1 per
+        # genset (wear score) and +1 per battery (full-equivalent-cycles) --
+        # both already computed by allotrope.intelligence.asset_health,
+        # wired in here rather than duplicated.
+        return 14 + 6 * len(self.cfg.gensets) + 3 * len(self.cfg.storage)
 
     # -- gym api ----------------------------------------------------------
 
@@ -133,6 +161,9 @@ class PolarMicrogridEnv(gym.Env):
         self._prev_unmet_water = self.plant.state.unmet_water_kwh
         self.last_breakdown = None
         self.last_safety_report = None
+        self._asset_tracker = AssetHealthTracker(self.cfg, dt_h=self.plant.dt_h)
+        self._load_history = []
+        self._renewable_history = []
         return self._observe(), {"start_index": start_index}
 
     def step(
@@ -148,6 +179,9 @@ class PolarMicrogridEnv(gym.Env):
 
         telemetry = self.plant.step(command)
         telemetry["min_indoor_temp_c"] = self.cfg.criticality.min_indoor_temp_c
+        self._asset_tracker.update(telemetry)
+        self._load_history.append(telemetry["electrical_load_kw"])
+        self._renewable_history.append(telemetry["pv_available_kw"] + telemetry["wind_available_kw"])
 
         deposit = self._mean_deposit()
         unmet_water = self.plant.state.unmet_water_kwh
@@ -243,6 +277,28 @@ class PolarMicrogridEnv(gym.Env):
         day_angle = 2.0 * np.pi * seconds / SECONDS_PER_DAY
         year_angle = 2.0 * np.pi * timestamp.dayofyear / DAYS_PER_YEAR
 
+        # Forecast features: EWMA at FORECAST_HORIZON_STEPS ahead, the one
+        # horizon docs/forecasting.md's own evaluation found actually beats
+        # plain persistence (see that module's real measured numbers) --
+        # not the instantaneous current value already carried above, which
+        # is what a 1-step "forecast" would just duplicate. Before any step
+        # has run this episode (`reset`'s initial observation), there is no
+        # history yet; fall back to the current reading itself, exactly
+        # what PersistenceForecaster would do with a single-point history
+        # and what SeasonalNaiveForecaster/EWMAForecaster already do for
+        # their own first steps -- an honest "no information yet" default,
+        # not a fabricated forecast.
+        load_forecast = (
+            self._forecaster.forecast(np.asarray(self._load_history), FORECAST_HORIZON_STEPS)
+            if self._load_history
+            else obs["electrical_load_kw"]
+        )
+        renewable_forecast = (
+            self._forecaster.forecast(np.asarray(self._renewable_history), FORECAST_HORIZON_STEPS)
+            if self._renewable_history
+            else obs["pv_available_kw"] + obs["wind_available_kw"]
+        )
+
         features = [
             obs["electrical_load_kw"] / scale,
             obs["critical_load_kw"] / scale,
@@ -256,6 +312,8 @@ class PolarMicrogridEnv(gym.Env):
             np.sin(day_angle),
             np.cos(day_angle),
             np.sin(year_angle),
+            load_forecast / scale,
+            renewable_forecast / scale,
         ]
         features += [float(v) for v in obs["genset_online"]]
         features += [p / g.rated_kw for p, g in zip(obs["genset_power_kw"], cfg.gensets)]
@@ -277,6 +335,21 @@ class PolarMicrogridEnv(gym.Env):
         features += [
             obs["battery_max_discharge_kw"][k] / max(s.max_discharge_kw, 1.0)
             for k, s in enumerate(cfg.storage)
+        ]
+        # Accumulated stress, from allotrope.intelligence.asset_health --
+        # the same wear-score/full-equivalent-cycles formulas that module
+        # already reports read-only, now visible to the agent so it can see
+        # stress accumulated *this episode* rather than only the current
+        # step's deposit. Divided down from the wear score's native rupee
+        # scale (thousands to tens of thousands over an episode) into the
+        # observation's usual range; both still clip at the same [-5, 5]
+        # every other feature does for an unusually stressed episode,
+        # rather than getting a bespoke unclipped scale.
+        features += [
+            self._asset_tracker.gensets[g.id].wear_score().value / 5000.0 for g in cfg.gensets
+        ]
+        features += [
+            self._asset_tracker.batteries[s.id].full_equivalent_cycles().value for s in cfg.storage
         ]
         return np.clip(np.asarray(features, dtype=np.float32), -5.0, 5.0)
 

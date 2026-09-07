@@ -39,7 +39,7 @@ def _dims(cfg):
     # constructed just to learn a dimension -- but that means this must be
     # kept in sync by hand; a mismatch fails loudly (a matmul shape error),
     # never silently, as it did the one time this actually drifted.
-    obs_dim = 12 + 5 * len(cfg.gensets) + 2 * len(cfg.storage)
+    obs_dim = 14 + 6 * len(cfg.gensets) + 3 * len(cfg.storage)
     n_g = len(cfg.gensets)
     dispatch_dim = n_g + len(cfg.storage) + 1
     return obs_dim, n_g, dispatch_dim

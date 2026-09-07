@@ -6,10 +6,9 @@ step. A controller that could see a few hours or a day of where those are
 headed -- rather than only their instantaneous value -- could pre-position
 storage and commit gensets ahead of a load ramp instead of reacting to it.
 This module is that forecasting capability, built and evaluated standalone.
-
-It is **not** wired into `allotrope.agents`, `allotrope.envs` or
-`allotrope.safety` in this pass. See `docs/forecasting.md` for exactly what
-is and is not done.
+`EWMAForecaster` at the 24h horizon is now wired into
+`allotrope.envs.polar_microgrid.PolarMicrogridEnv._observe`; see
+`docs/forecasting.md` for exactly what is and is not done.
 
 Two honest, non-learned methods are implemented, both cheap enough to run on
 station hardware without touching the satellite link:
