@@ -13,7 +13,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from allotrope.config import StationConfig, load_station
-from allotrope.sim.plant import PolarMicrogrid
+from allotrope.sim.plant import DispatchCommand, PolarMicrogrid
 from allotrope.synth.climate import ClimateGenerator, ClimateSeries
 from allotrope.synth.loads import LoadGenerator, LoadSeries
 
@@ -67,8 +67,18 @@ def run_episode(
     controller: Any,
     max_steps: int | None = None,
     progress: Callable[[int, int], None] | None = None,
+    command_hook: Callable[[int, DispatchCommand], DispatchCommand] | None = None,
 ) -> EpisodeResult:
-    """Step the plant under a controller until the weather series runs out."""
+    """Step the plant under a controller until the weather series runs out.
+
+    `command_hook`, when given, is called as `command_hook(step, command)`
+    after the controller decides and before the plant executes, and its
+    return value is what actually reaches `plant.step`. This is the one
+    seam this shared entry point offers for a caller that needs to alter
+    what the plant sees without altering the controller under test --
+    `allotrope.resilience.benchmark` is the motivating use, applying
+    scripted equipment faults identically to every controller compared.
+    """
     plant.reset()
     if hasattr(controller, "reset"):
         controller.reset()
@@ -79,6 +89,8 @@ def run_episode(
     for step in range(limit):
         observation = plant.observe()
         command = controller.act(observation, plant)
+        if command_hook is not None:
+            command = command_hook(step, command)
         telemetry = plant.step(command)
         records.append(_flatten(telemetry))
         if progress is not None and step % 500 == 0:
